@@ -1,0 +1,18 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 3D Printed Spare Parts — Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+# Install with:  pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Anthropic SDK — official Python client for the Claude API
+# Provides client.messages.parse() for structured output (used in pipeline.py)
+anthropic>=0.45.0
+
+# Requests — simple HTTP library for calling NewsAPI and WordPress.com REST API
+requests>=2.31.0
+
+# python-dotenv — loads .env file variables into os.environ at startup
+python-dotenv>=1.0.0
+
+# Pydantic v2 — data validation; defines ArticleAnalysis structured-output model
+pydantic>=2.0.0

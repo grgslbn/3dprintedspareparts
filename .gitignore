@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .gitignore — Files that should NEVER be committed to Git
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# Your real API keys. Use .env.example (which IS committed) as a template.
+.env
+
+
+# ── Pipeline runtime files ────────────────────────────────────────────────────
+# Log file grows with every run — no need to track it in version control.
+pipeline.log
+
+# The duplicate-prevention database is local state; Railway uses its own
+# persistent volume (or you can switch to a database — see README).
+posted_articles.json
+
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env.local
+.env.*.local
+
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo

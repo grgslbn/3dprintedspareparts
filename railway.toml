@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# railway.toml — Railway deployment configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Railway reads this file automatically when you deploy the project.
+#
+# IMPORTANT — environment variables:
+#   After deploying, go to your Railway project → Variables tab and add:
+#     NEWSAPI_KEY, ANTHROPIC_API_KEY, WP_SITE_ID, WP_TOKEN
+#   Do NOT commit .env to Git — set them directly in the Railway dashboard.
+#
+# Cron schedule:  "0 8 * * *" = every day at 08:00 UTC
+#   ┌─ minute  (0)
+#   │ ┌─ hour   (8  = 8 AM)
+#   │ │ ┌─ day of month  (* = every day)
+#   │ │ │ ┌─ month        (* = every month)
+#   │ │ │ │ ┌─ day of week (* = any day)
+#   0 8 * * *
+#
+# To change the schedule, adjust cronSchedule using standard cron syntax.
+# Timezone converter: https://dateful.com/time-zone-converter
+# ─────────────────────────────────────────────────────────────────────────────
+
+[build]
+# Nixpacks auto-detects Python and installs requirements.txt automatically.
+builder = "NIXPACKS"
+
+[deploy]
+# The command Railway runs on each scheduled trigger.
+startCommand   = "python pipeline.py"
+
+# Run daily at 08:00 UTC.
+# Railway uses UTC for all cron schedules.
+cronSchedule   = "0 8 * * *"
+
+# Set the Python version explicitly for reproducibility.
+# Nixpacks will use this if a .python-version file is absent.
+# (Alternatively, create a .python-version file containing "3.11")
