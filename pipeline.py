@@ -4,10 +4,14 @@
 ====================================================
 
 HOW IT WORKS (high-level):
-  1. NewsAPI      → Fetch recent English news about "3D printed spare parts"
-  2. Claude AI    → Score relevance, rewrite in professional tone, assign
-                    a category, and generate SEO tags  (structured output)
-  3. WordPress.com → Publish any article that scores 7 or higher
+  1. NewsAPI       → Fetch recent English news about "3D printed spare parts"
+  2. Claude AI     → Score relevance, rewrite in professional tone, assign
+                     a category, and generate SEO tags  (structured output)
+  3. Gemini Imagen → Generate a featured image for every approved article:
+                     a. Claude writes an optimised Imagen prompt
+                     b. Gemini Imagen renders a photorealistic 16:9 image
+                     c. The image is uploaded to the WordPress.com media library
+  4. WordPress.com → Publish any article scoring 7+ with its featured image set
 
 DUPLICATE PREVENTION:
   Every article URL we process (pass or fail the score threshold) is saved
@@ -41,10 +45,12 @@ from typing import List, Literal, Optional
 # ─────────────────────────────────────────────────────────────────────────────
 # THIRD-PARTY IMPORTS  (installed via requirements.txt)
 # ─────────────────────────────────────────────────────────────────────────────
-import requests                   # HTTP calls to NewsAPI and WordPress.com
-from anthropic import Anthropic   # Official Claude SDK
-from dotenv import load_dotenv    # Reads .env into os.environ at startup
-from pydantic import BaseModel    # Data-validation for Claude's structured output
+import requests                          # HTTP calls to NewsAPI and WordPress.com
+from anthropic import Anthropic          # Official Claude SDK
+from dotenv import load_dotenv           # Reads .env into os.environ at startup
+from google import genai as google_genai # Official Google Generative AI SDK
+from google.genai import types as genai_types
+from pydantic import BaseModel           # Data-validation for Claude's structured output
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -53,7 +59,7 @@ from pydantic import BaseModel    # Data-validation for Claude's structured outp
 
 # Load .env FIRST so every os.getenv() call below finds the values.
 load_dotenv(override=True)   # override=True ensures .env values win even if the
-                            # variable already exists as an empty string in the OS env
+                             # variable already exists as an empty string in the OS env
 
 # ── File paths ────────────────────────────────────────────────────────────────
 LOG_FILE            = "pipeline.log"          # Appended on every run
@@ -64,12 +70,14 @@ NEWSAPI_KEY   = os.getenv("NEWSAPI_KEY")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")   # Read automatically by Anthropic()
 WP_SITE_ID    = os.getenv("WP_SITE_ID")           # e.g. "3dprintedspareparts.com"
 WP_TOKEN      = os.getenv("WP_TOKEN")             # WordPress.com Bearer token
+GEMINI_KEY    = os.getenv("GEMINI_API_KEY")       # Google AI Studio key for Imagen
 
 # ── Pipeline settings — feel free to tweak these ─────────────────────────────
 NEWS_QUERY          = "3D printed spare parts"
 NEWS_PAGE_SIZE      = 10     # How many articles to pull per run (max 100 on free NewsAPI)
 RELEVANCE_THRESHOLD = 7      # Minimum score out of 10 needed to publish
 CLAUDE_MODEL        = "claude-opus-4-6"
+GEMINI_IMAGE_MODEL  = "imagen-3.0-generate-002"  # Imagen 3 — highest quality
 DELAY_BETWEEN_CALLS = 1.5    # Seconds between Claude calls — respects rate limits
 
 
@@ -307,10 +315,194 @@ TAGS — 3 to 5 items, all lowercase, hyphenated where multi-word:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — WORDPRESS PUBLISHING  (WordPress.com REST API)
+# SECTION 6 — IMAGE PROMPT GENERATION  (Claude)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def publish_to_wordpress(analysis: ArticleAnalysis, source_url: str) -> bool:
+def generate_image_prompt(
+    client: Anthropic,
+    analysis: ArticleAnalysis,
+) -> Optional[str]:
+    """
+    Ask Claude to write an optimised text-to-image prompt for Gemini Imagen.
+
+    Why Claude for this step?
+      • Claude has read the full article and understands the nuance
+      • A well-crafted prompt produces significantly better Imagen output
+      • We keep the prompt industrial/technical to match our site's audience
+
+    Prompt rules enforced:
+      - Photorealistic style, no text or overlays in the image
+      - 3D printing / manufacturing subject matter
+      - ≤ 200 characters (Imagen works best with concise, vivid prompts)
+      - Landscape 16:9 framing (matches WordPress featured-image dimensions)
+
+    Returns the prompt string on success, or None if the Claude call fails.
+    """
+    prompt = f"""You are an expert at writing prompts for AI image generation (Google Imagen).
+
+Write a single image generation prompt for the blog post below. The image will
+be used as the featured hero image on a 3D printing & spare parts blog.
+
+Article title: {analysis.rewritten_title}
+Category:      {analysis.category}
+Tags:          {', '.join(analysis.tags)}
+
+STRICT RULES — your prompt MUST follow all of these:
+1. Photorealistic style — cinematic lighting, high detail
+2. Subject must relate clearly to 3D printing, manufacturing, or spare parts
+3. No people, no faces, no text, no logos in the image
+4. Landscape / wide-angle composition (16:9 format)
+5. Maximum 200 characters in total
+6. Return ONLY the prompt text — no explanations, no quotes, no labels
+
+Example of a good prompt:
+  Close-up macro photo of a white FDM 3D printer nozzle depositing molten
+  plastic filament layer by layer, industrial workshop background, shallow DOF
+"""
+
+    try:
+        log.info("  → Generating image prompt with Claude…")
+
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        image_prompt = response.content[0].text.strip()
+
+        # Truncate hard at 400 chars as a safety net — Imagen can handle long
+        # prompts but shorter ones are more predictable.
+        if len(image_prompt) > 400:
+            image_prompt = image_prompt[:400]
+
+        log.info(f'  ✓ Image prompt: "{image_prompt[:100]}{"…" if len(image_prompt) > 100 else ""}"')
+        return image_prompt
+
+    except Exception as exc:
+        log.error(f"  ✗ Image prompt generation failed: {exc}")
+        return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — IMAGE GENERATION  (Google Gemini Imagen)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def generate_image_with_gemini(
+    gemini_client: google_genai.Client,
+    prompt: str,
+) -> Optional[bytes]:
+    """
+    Call the Gemini Imagen API to generate a single photorealistic image.
+
+    Model used: imagen-3.0-generate-002  (Imagen 3 — highest quality tier)
+    Output:     PNG bytes at 1024×576 (16:9) — ready for direct upload
+
+    Why Imagen 3?
+      • Best-in-class photorealism for product/industrial photography style
+      • Consistent, clean results for technical subject matter
+
+    Returns raw PNG bytes on success, or None on any failure.
+    Failures here are non-fatal — the post will still be published, just
+    without a featured image.
+    """
+    try:
+        log.info(f"  → Sending prompt to Gemini Imagen ({GEMINI_IMAGE_MODEL})…")
+
+        response = gemini_client.models.generate_images(
+            model=GEMINI_IMAGE_MODEL,
+            prompt=prompt,
+            config=genai_types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="16:9",           # Wide landscape — ideal for blog heroes
+                safety_filter_level="block_only_high",  # Allow industrial/mechanical content
+                person_generation="dont_allow",          # No people — avoids edge-case issues
+            ),
+        )
+
+        if not response.generated_images:
+            log.warning("  ⚠ Gemini returned no images (prompt may have been filtered).")
+            return None
+
+        image_bytes = response.generated_images[0].image.image_bytes
+        log.info(f"  ✓ Image generated ({len(image_bytes):,} bytes)")
+        return image_bytes
+
+    except Exception as exc:
+        log.error(f"  ✗ Gemini Imagen error: {exc}")
+        return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — WORDPRESS MEDIA UPLOAD
+# ═════════════════════════════════════════════════════════════════════════════
+
+def upload_image_to_wordpress(
+    image_bytes: bytes,
+    filename: str,
+) -> Optional[int]:
+    """
+    Upload a PNG image to the WordPress.com media library.
+
+    Endpoint:
+      POST https://public-api.wordpress.com/rest/v1.1/sites/{SITE_ID}/media/new
+
+    The image is sent as multipart/form-data.  WordPress.com returns the
+    assigned media ID which we then pass to publish_to_wordpress() so the
+    post's featured image is set automatically.
+
+    Returns the integer media ID on success, or None on any failure.
+    """
+    endpoint = (
+        f"https://public-api.wordpress.com/rest/v1.1"
+        f"/sites/{WP_SITE_ID}/media/new"
+    )
+
+    try:
+        log.info(f"  → Uploading image to WordPress media library ({filename})…")
+
+        resp = requests.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {WP_TOKEN}"},
+            files={"media[]": (filename, image_bytes, "image/png")},
+            timeout=60,   # Image upload can be slow on Railway — give it time
+        )
+        resp.raise_for_status()
+
+        data = resp.json()
+        # The API returns a 'media' list even for single uploads
+        media_list = data.get("media", [])
+        if not media_list:
+            log.error(f"  ✗ WordPress media upload returned empty media list: {data}")
+            return None
+
+        media_id = media_list[0].get("ID")
+        media_url = media_list[0].get("URL", "unknown")
+        log.info(f"  ✓ Media uploaded  ID={media_id}  URL={media_url}")
+        return int(media_id) if media_id else None
+
+    except requests.exceptions.HTTPError as exc:
+        try:
+            detail = exc.response.json()
+        except Exception:
+            detail = exc.response.text
+        log.error(f"  ✗ WordPress media upload HTTP {exc.response.status_code}: {detail}")
+        return None
+
+    except requests.exceptions.RequestException as exc:
+        log.error(f"  ✗ WordPress media upload request error: {exc}")
+        return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 9 — WORDPRESS PUBLISHING  (WordPress.com REST API)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def publish_to_wordpress(
+    analysis: ArticleAnalysis,
+    source_url: str,
+    featured_image_id: Optional[int] = None,
+) -> bool:
     """
     Create a new published post on WordPress.com using their REST API v1.1.
 
@@ -323,8 +515,9 @@ def publish_to_wordpress(analysis: ArticleAnalysis, source_url: str) -> bool:
       (Create an app → Authorize → copy the access token into WP_TOKEN)
 
     The WordPress.com API v1.1 accepts:
-      - categories  as a plain string  (e.g. "Automotive")
-      - tags        as a comma-separated string
+      - categories       as a plain string  (e.g. "Automotive")
+      - tags             as a comma-separated string
+      - featured_image   as a media ID integer (optional; omitted if None)
 
     Returns True if the post was created successfully, False otherwise.
     """
@@ -342,6 +535,11 @@ def publish_to_wordpress(analysis: ArticleAnalysis, source_url: str) -> bool:
         "format":     "standard",
     }
 
+    # Only attach the featured image if we successfully generated and uploaded one
+    if featured_image_id is not None:
+        payload["featured_image"] = str(featured_image_id)
+        log.info(f"  → Attaching featured image  ID={featured_image_id}")
+
     try:
         log.info(f'  → Publishing: "{analysis.rewritten_title}"')
 
@@ -354,9 +552,10 @@ def publish_to_wordpress(analysis: ArticleAnalysis, source_url: str) -> bool:
         resp.raise_for_status()
 
         post = resp.json()
+        image_note = f"  (featured image: {featured_image_id})" if featured_image_id else ""
         log.info(
             f"  ✅ Published!  ID={post.get('ID')}  "
-            f"URL={post.get('URL', 'unknown')}"
+            f"URL={post.get('URL', 'unknown')}{image_note}"
         )
         return True
 
@@ -376,12 +575,12 @@ def publish_to_wordpress(analysis: ArticleAnalysis, source_url: str) -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — CONFIG VALIDATION
+# SECTION 10 — CONFIG VALIDATION
 # ═════════════════════════════════════════════════════════════════════════════
 
 def validate_env() -> bool:
     """
-    Check that all four required environment variables have been set.
+    Check that all five required environment variables have been set.
 
     Called at the very start of run() so the pipeline fails fast with a
     clear message rather than crashing mid-way with a cryptic error.
@@ -391,6 +590,7 @@ def validate_env() -> bool:
         "ANTHROPIC_API_KEY":  ANTHROPIC_KEY,
         "WP_SITE_ID":         WP_SITE_ID,
         "WP_TOKEN":           WP_TOKEN,
+        "GEMINI_API_KEY":     GEMINI_KEY,
     }
     missing = [key for key, val in required.items() if not val]
 
@@ -403,7 +603,7 @@ def validate_env() -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — MAIN PIPELINE  (orchestrates all steps)
+# SECTION 11 — MAIN PIPELINE  (orchestrates all steps)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def run() -> None:
@@ -418,8 +618,11 @@ def run() -> None:
           a. Skip if the URL was already processed (no duplicates)
           b. Send to Claude for analysis
           c. Skip if relevance score < RELEVANCE_THRESHOLD (default: 7)
-          d. Publish to WordPress.com
-          e. Record the URL so it won't be processed again
+          d. Ask Claude to generate an Imagen prompt for the article
+          e. Send prompt to Gemini Imagen → receive PNG bytes
+          f. Upload the image to WordPress.com media library
+          g. Publish post to WordPress.com with featured image attached
+          h. Record the URL so it won't be processed again
       5.  Save the updated URL list to disk
       6.  Print a summary of what happened this run
     """
@@ -433,9 +636,11 @@ def run() -> None:
         log.error("Pipeline aborted — fix the missing env vars above.")
         return
 
-    # ── Initialise Claude client ──────────────────────────────────────────
+    # ── Initialise API clients ────────────────────────────────────────────
     # Anthropic() reads ANTHROPIC_API_KEY from the environment automatically.
     claude = Anthropic()
+    # google_genai.Client() uses the provided api_key.
+    gemini = google_genai.Client(api_key=GEMINI_KEY)
 
     # ── Step 2: Load duplicate tracker ───────────────────────────────────
     posted_urls = load_posted_urls()
@@ -453,6 +658,7 @@ def run() -> None:
     skipped_score = 0   # Scored below the threshold
     published     = 0   # Successfully posted to WordPress
     errors        = 0   # Any kind of failure
+    images_added  = 0   # Posts that got a featured image successfully
 
     # ── Step 4: Process each article ─────────────────────────────────────
     for idx, article in enumerate(articles, start=1):
@@ -493,12 +699,44 @@ def run() -> None:
             posted_urls.add(url)
             continue
 
-        # 4e — Score is good — publish!
+        # 4e — Score is good — generate a featured image ──────────────────
         log.info(
             f"  Score {analysis.relevance_score}/10 ✓ — "
-            "above threshold, publishing…"
+            "above threshold, generating featured image…"
         )
-        success = publish_to_wordpress(analysis, url)
+
+        featured_image_id: Optional[int] = None   # Will stay None if any step fails
+
+        # Step 1: Claude writes the Imagen prompt
+        image_prompt = generate_image_prompt(claude, analysis)
+
+        if image_prompt:
+            # Step 2: Gemini Imagen renders the image
+            image_bytes = generate_image_with_gemini(gemini, image_prompt)
+
+            if image_bytes:
+                # Step 3: Upload the PNG to the WordPress media library
+                safe_slug = (
+                    analysis.rewritten_title.lower()
+                    .replace(" ", "-")
+                    [:40]                         # Limit filename length
+                    .rstrip("-")
+                )
+                filename = f"{safe_slug}-{int(time.time())}.png"
+                featured_image_id = upload_image_to_wordpress(image_bytes, filename)
+
+                if featured_image_id:
+                    images_added += 1
+                else:
+                    log.warning("  ⚠ Image upload failed — publishing without featured image.")
+            else:
+                log.warning("  ⚠ Imagen returned no image — publishing without featured image.")
+        else:
+            log.warning("  ⚠ Image prompt generation failed — publishing without featured image.")
+
+        # 4f — Publish to WordPress (with or without featured image)
+        log.info("  → Publishing to WordPress…")
+        success = publish_to_wordpress(analysis, url, featured_image_id=featured_image_id)
 
         # Always record the URL whether publishing succeeded or not.
         # If WordPress fails once, we won't re-analyse next run — which is
@@ -525,6 +763,7 @@ def run() -> None:
     log.info(f"  Skipped (seen before):   {skipped_dup}")
     log.info(f"  Skipped (score too low): {skipped_score}")
     log.info(f"  Published to WordPress:  {published}")
+    log.info(f"  With featured image:     {images_added}")
     log.info(f"  Errors:                  {errors}")
     log.info("=" * 60)
     log.info("  Pipeline finished.")
