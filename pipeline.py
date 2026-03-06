@@ -77,7 +77,7 @@ NEWS_QUERY          = "3D printed spare parts"
 NEWS_PAGE_SIZE      = 10     # How many articles to pull per run (max 100 on free NewsAPI)
 RELEVANCE_THRESHOLD = 7      # Minimum score out of 10 needed to publish
 CLAUDE_MODEL        = "claude-opus-4-6"
-GEMINI_IMAGE_MODEL  = "imagen-3.0-generate-002"  # Imagen 3 — highest quality
+GEMINI_IMAGE_MODEL  = "imagen-4.0-generate-001"  # Imagen 4 — highest quality available
 DELAY_BETWEEN_CALLS = 1.5    # Seconds between Claude calls — respects rate limits
 
 
@@ -395,7 +395,7 @@ def generate_image_with_gemini(
     """
     Call the Gemini Imagen API to generate a single photorealistic image.
 
-    Model used: imagen-3.0-generate-002  (Imagen 3 — highest quality tier)
+    Model used: imagen-4.0-generate-001  (Imagen 4 — highest quality available)
     Output:     PNG bytes at 1024×576 (16:9) — ready for direct upload
 
     Why Imagen 3?
@@ -415,8 +415,8 @@ def generate_image_with_gemini(
             config=genai_types.GenerateImagesConfig(
                 number_of_images=1,
                 aspect_ratio="16:9",           # Wide landscape — ideal for blog heroes
-                safety_filter_level="block_only_high",  # Allow industrial/mechanical content
-                person_generation="dont_allow",          # No people — avoids edge-case issues
+                safety_filter_level="block_low_and_above",  # Required value for Imagen 4
+                person_generation="dont_allow",              # No people — avoids edge-case issues
             ),
         )
 
